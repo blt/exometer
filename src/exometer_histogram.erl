@@ -50,8 +50,8 @@ probe_init(Name, _Type, Options) ->
 					     { slot_period,100 } ] ++ Options),
     Slide = exometer_slot_slide:new(St#st.time_span,
 				    St#st.slot_period,
-				    { ?MODULE, average_sample, []},
-				    { ?MODULE, average_transform, []}),
+				    fun average_sample/3,
+				    fun average_transform/2),
     {ok, St#st{ slide = Slide }}.
 
 delete(Name, Type, Ref) ->

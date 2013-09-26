@@ -38,6 +38,7 @@
 	 setopts/2,
 	 find_entries/1,
 	 select/1, select/2, select_cont/1,
+	 select_setopts/2, select_setopts/3,
 	 info/1,
 	 info/2]).
 
@@ -98,9 +99,10 @@ new(Name, Type0, Opts0) when is_list(Name), is_list(Opts0) ->
 					 [{type_arg, Type0}|Opts0]};
 		     true -> {Type0, Opts0}
 		  end,
-    #exometer_entry{} = E = exometer_admin:lookup_definition(Name, Type),
-    create_entry(E#exometer_entry { name = Name }, Opts).
-
+    #exometer_entry{options = DefOpts} = E =
+	exometer_admin:lookup_definition(Name, Type),
+    Opts1 = DefOpts ++ Opts,
+    create_entry(process_opts(E#exometer_entry{name = Name}, Opts1), Opts1).
 
 
 -spec update(name(), value()) -> ok | error().
@@ -260,7 +262,7 @@ setopts(Name, Options)  when is_list(Name), is_list(Options) ->
 		    Elems = process_setopts(E, Options),
 		    update_entry_elems(Name, Elems),
 		    call_setopts(M, Name, Options, Type, Ref);
-		false ->
+		_ ->
 		    {error, disabled}
 	    end;
 	[] ->
@@ -271,22 +273,22 @@ call_setopts(?MODULE, _, _, _, _) -> ok;
 call_setopts(M, Name, Options, Type, Ref) ->
     M:setopts(Name, Options, Type, Ref).
 
-
 create_entry(#exometer_entry{module = ?MODULE, type = counter} = E, []) ->
     E1 = E#exometer_entry{value = 0},
     [ets:insert(T, E1) || T <- exometer:tables()],
     ok;
 create_entry(#exometer_entry{module = M,
 			     type = Type,
-			     options = OptsTemplate,
+			     options = Opts,
 			     name = Name} = E, Opts) ->
     %% Process local options before handing off the rest to M:new.
-    E1 = process_opts(E, OptsTemplate ++ Opts),
-    case Res = M:new(Name, Type, E1#exometer_entry.options) of
+%%     E1 = process_opts(E, OptsTemplate ++ Opts),
+    case Res = M:new(Name, Type, Opts) of
        ok ->
-	    [ets:insert(T, E1#exometer_entry{options = []}) || T <- exometer:tables()];
+	    [ets:insert(T, E#exometer_entry{options = []})
+	     || T <- exometer:tables()];
 	{ok, Ref} ->
-	    [ets:insert(T, E1#exometer_entry{ ref = Ref, options=[] })
+	    [ets:insert(T, E#exometer_entry{ ref = Ref, options=[] })
 	     || T <- exometer:tables()];
 	_ ->
 	    true
@@ -406,6 +408,19 @@ select_cont('$end_of_table') -> '$end_of_table';
 select_cont(Cont) ->
     ets:select(Cont).
 
+select_setopts(Pattern, Opts) ->
+    select_setopts(Pattern, Opts, 100).
+
+select_setopts(Pattern, Opts, Limit) ->
+    select_setopts_(select(Pattern, Limit), Opts, []).
+
+select_setopts_({Entries, Cont}, Opts, Acc) ->
+    Res = [setopts(N, Opts) || {N,_,_} <- Entries],
+    select_setopts_(select_cont(Cont), Opts, Acc ++ Res);
+select_setopts_('$end_of_table', _, Acc) ->
+    Acc.
+
+
 pattern({'_', Gs, Prod}) ->
     {'_', repl(Gs, g_subst(['$_'])), repl(Prod, p_subst(['$_']))};
 pattern({KP, Gs, Prod}) when is_atom(KP) ->
@@ -451,6 +466,12 @@ process_opts(Entry, Options) ->
 	  %%        Entry1#exometer_entry { something = Val };
 	  %% Unknown option, pass on to exometer entry options list, replacing
 	  %% any earlier versions of the same option.
+	  ({module, Mod}, E) ->
+	      if is_atom(Mod) ->
+		      E#exometer_entry{module = Mod};
+		 true ->
+		      error({illegal, {module, Mod}})
+	      end;
 	  ({cache, Val}, E) ->
 	      if is_integer(Val), Val >= 0 ->
 		      E#exometer_entry{cache = Val};

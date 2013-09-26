@@ -33,6 +33,9 @@ reset(Name, counter, _Ref) ->
 reset(_, _, _) ->
     {error, unsupported}.
 
+setopts(_, _, _, _) ->
+    ok.
+
 get_value(Name, Type, Ref) ->
     try get_value_(Name, Type, Ref)
     catch

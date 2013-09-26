@@ -212,7 +212,7 @@ add_element(Val, Slide) ->
     add_element(timestamp(), Val, Slide).
 
 add_element(TS, Val, #slide{cur_slot = CurrentSlot, 
-			    sample_mfa = SampleMFA} = Slide) ->
+			    sample_mfa = SampleF} = Slide) ->
 
     TSSlot = get_slot(TS, Slide),
     
@@ -238,8 +238,8 @@ add_element(TS, Val, #slide{cur_slot = CurrentSlot,
     %%
     %% Invoke the sample MFA to get a new state to work with
     %%
-    { SM, SF, SA } = SampleMFA,
-    Slide1#slide { cur_state = apply(SM, SF, [ TS, Val, Slide1#slide.cur_state ] ++ SA)}.
+    %% { SM, SF, SA } = SampleMFA,
+    Slide1#slide { cur_state = SampleF(TS, Val, Slide1#slide.cur_state)}.
 
 
 -spec to_list(#slide{}) -> list().
@@ -322,15 +322,15 @@ add_slot(TS, #slide{timespan = TimeSpan,
 			slot_period = SlotPeriod,
 			cur_slot = CurrentSlot,
 			cur_state = CurrentState,
-			transform_mfa = TransformMFA,
+			transform_mfa = TransformF,
 			list1 = List1,
 			list1_start_slot = StartSlot} = Slide) ->
 
     %% Transform current slot state to an element to be deposited
     %% in the histogram list
-    { TM, TF, TA } = TransformMFA,
+    %% { TM, TF, TA } = TransformMFA,
     TSSlot = trunc(TS / SlotPeriod),
-    case apply(TM, TF, [ TS, CurrentState ] ++ TA) of 
+    case TransformF(TS, CurrentState) of 
 	undefined ->  %% Transformation function could not produce an element
 	    %% Reset the time slot to the current slot. Reset state./
 	    Slide#slide{ cur_slot = TSSlot,

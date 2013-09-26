@@ -113,7 +113,9 @@ new(Name, Type0, Opts0) when is_list(Name), is_list(Opts0) ->
 %% `ok' will be returned without any other action being taken.
 %% @end
 update(Name, Value) when is_list(Name) ->
-    case ets:lookup(Table = exometer:table(), Name) of
+    case ets:lookup(Table = table(), Name) of
+        [#exometer_entry{status = disabled}] ->
+            ok;
 	[#exometer_entry{module = ?MODULE, type = counter}] ->
 	    ets:update_counter(Table, Name, {#exometer_entry.value, Value}),
 	    ok;
@@ -134,7 +136,7 @@ update(Name, Value) when is_list(Name) ->
 %% value will be returned.
 %% @end
 get_value(Name) when is_list(Name) ->
-    case ets:lookup(exometer:table(), Name) of
+    case ets:lookup(table(), Name) of
 	[#exometer_entry{} = E] ->
 	    {ok, get_value_(E)};
 	_ ->
@@ -169,7 +171,7 @@ get_value_(#exometer_entry{status = Status, cache = Cache,
 -spec delete(name()) -> ok | error().
 %% @doc Delete the metric
 delete(Name) when is_list(Name) ->
-    case ets:lookup(exometer:table(), Name) of
+    case ets:lookup(table(), Name) of
 	[#exometer_entry{module = ?MODULE, type = counter}] ->
 	    [ets:delete(T, Name) || T <- exometer:tables()];
 	[#exometer_entry{module = M, type = Type, ref = Ref}] ->
@@ -191,7 +193,7 @@ delete(Name) when is_list(Name) ->
 %% operation likely has no effect, and will return `ok'.
 %% @end
 sample(Name)  when is_list(Name) ->
-    case ets:lookup(exometer:table(), Name) of
+    case ets:lookup(table(), Name) of
 	[#exometer_entry{module = ?MODULE, type = counter}] ->
 	    ok;
 	[#exometer_entry{status = enabled,
@@ -214,7 +216,7 @@ sample(Name)  when is_list(Name) ->
 %% indicate the time that has passed since the metric was last reset.
 %% @end
 reset(Name)  when is_list(Name) ->
-    case ets:lookup(exometer:table(), Name) of
+    case ets:lookup(table(), Name) of
 	[#exometer_entry{status = enabled,
 			 module = ?MODULE, type = counter}] ->
 	    TS = exometer:timestamp(),
@@ -245,25 +247,29 @@ reset(Name)  when is_list(Name) ->
 %% other options to be processed.
 %% @end
 setopts(Name, Options)  when is_list(Name), is_list(Options) ->
-    case ets:lookup(exometer:table(), Name) of
+    case ets:lookup(table(), Name) of
 	[#exometer_entry{status = enabled,
 			 module = M, type = Type, ref = Ref} = E] ->
 	    Elems = process_setopts(E, Options),
 	    update_entry_elems(Name, Elems),
-	    M:setopts(Name, Options, Type, Ref);
+	    call_setopts(M, Name, Options, Type, Ref);
 	[#exometer_entry{status = disabled,
 			 module = M, type = Type, ref = Ref} = E] ->
 	    case lists:keyfind(status, 1, Options) of
 		{_, enabled} ->
 		    Elems = process_setopts(E, Options),
 		    update_entry_elems(Name, Elems),
-		    M:setopts(Name, Options, Type, Ref);
+		    call_setopts(M, Name, Options, Type, Ref);
 		false ->
 		    {error, disabled}
 	    end;
 	[] ->
 	    {error, not_found}
     end.
+
+call_setopts(?MODULE, _, _, _, _) -> ok;
+call_setopts(M, Name, Options, Type, Ref) ->
+    M:setopts(Name, Options, Type, Ref).
 
 
 create_entry(#exometer_entry{module = ?MODULE, type = counter} = E, []) ->
@@ -278,9 +284,9 @@ create_entry(#exometer_entry{module = M,
     E1 = process_opts(E, OptsTemplate ++ Opts),
     case Res = M:new(Name, Type, E1#exometer_entry.options) of
        ok ->
-	    [ets:insert(T, E1) || T <- exometer:tables()];
+	    [ets:insert(T, E1#exometer_entry{options = []}) || T <- exometer:tables()];
 	{ok, Ref} ->
-	    [ets:insert(T, E1#exometer_entry{ ref = Ref })
+	    [ets:insert(T, E1#exometer_entry{ ref = Ref, options=[] })
 	     || T <- exometer:tables()];
 	_ ->
 	    true
@@ -316,7 +322,7 @@ update_entry_elems(Name, Elems) ->
 %% * `ref' - Instance-specific reference; usually a pid (probe) or undefined
 %% @end
 info(Name, Item) ->
-    case ets:lookup(exometer:table(), Name) of
+    case ets:lookup(table(), Name) of
 	[#exometer_entry{} = E] ->
 	    case Item of
 		name      -> E#exometer_entry.name;
@@ -337,7 +343,7 @@ info(Name, Item) ->
 -spec info(name()) -> [{info(), any()}].
 %% @doc Returns a list of info items for Metric, see {@link info/2}.
 info(Name) ->
-    case ets:lookup(exometer:table(), Name) of
+    case ets:lookup(table(), Name) of
 	[#exometer_entry{} = E] ->
 	    Flds = record_info(fields, exometer_entry),
 	    lists:keyreplace(value, 1,
@@ -479,6 +485,9 @@ process_setopts(#exometer_entry{options = OldOpts} = Entry, Options) ->
 			  end;
 		     true -> error({illegal, {cache, Val}})
 		  end;
+             ({status, Status}, {E, Elems}) ->
+                 {E#exometer_entry{status = Status},
+                  add_elem(status, Status, Elems)};
 	     ({_,_}, Acc) ->
 		  Acc
 	  end, {Entry, []}, Options),
@@ -496,3 +505,74 @@ update_opts(New, Old) ->
       fun({K,_} = Opt, Acc) ->
 	      lists:keystore(K, 1, Acc, Opt)
       end, Old, New).
+
+table() ->
+    table(erlang:system_info(scheduler_id)).
+
+table(1) -> exometer_1;
+table(2) -> exometer_2;
+table(3) -> exometer_3;
+table(4) -> exometer_4;
+table(5) -> exometer_5;
+table(6) -> exometer_6;
+table(7) -> exometer_7;
+table(8) -> exometer_8;
+table(9) -> exometer_9;
+table(10) -> exometer_10;
+table(11) -> exometer_11;
+table(12) -> exometer_12;
+table(13) -> exometer_13;
+table(14) -> exometer_14;
+table(15) -> exometer_15;
+table(16) -> exometer_16;
+table(17) -> exometer_17;
+table(18) -> exometer_18;
+table(19) -> exometer_19;
+table(20) -> exometer_20;
+table(21) -> exometer_21;
+table(22) -> exometer_22;
+table(23) -> exometer_23;
+table(24) -> exometer_24;
+table(25) -> exometer_25;
+table(26) -> exometer_26;
+table(27) -> exometer_27;
+table(28) -> exometer_28;
+table(29) -> exometer_29;
+table(30) -> exometer_30;
+table(31) -> exometer_31;
+table(32) -> exometer_32;
+table(33) -> exometer_33;
+table(34) -> exometer_34;
+table(35) -> exometer_35;
+table(36) -> exometer_36;
+table(37) -> exometer_37;
+table(38) -> exometer_38;
+table(39) -> exometer_39;
+table(40) -> exometer_40;
+table(41) -> exometer_41;
+table(42) -> exometer_42;
+table(43) -> exometer_43;
+table(44) -> exometer_44;
+table(45) -> exometer_45;
+table(46) -> exometer_46;
+table(47) -> exometer_47;
+table(48) -> exometer_48;
+table(49) -> exometer_49;
+table(50) -> exometer_50;
+table(51) -> exometer_51;
+table(52) -> exometer_52;
+table(53) -> exometer_53;
+table(54) -> exometer_54;
+table(55) -> exometer_55;
+table(56) -> exometer_56;
+table(57) -> exometer_57;
+table(58) -> exometer_58;
+table(59) -> exometer_59;
+table(60) -> exometer_60;
+table(61) -> exometer_61;
+table(62) -> exometer_62;
+table(63) -> exometer_63;
+table(64) -> exometer_64;
+table(N) when is_integer(N), N > 20 ->
+    list_to_atom("exometer_" ++ integer_to_list(N)).
+

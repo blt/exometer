@@ -1,6 +1,6 @@
 %% MUST ONLY BE INVOKED THROUGH THE EXOMETER_PROBE.ERL MODULE.
 %% NOT MULTI-PROCESSS SAFE.
--module(exometer_histogram).
+-module(exometer_histogram_slim).
 -behaviour(exometer_entry).
 -behaviour(exometer_probe).
 
@@ -42,34 +42,62 @@
 %% exometer_entry callbacks
 %%
 new(Name, Type, Options) ->
-    exometer_probe:new(Name, Type, [{module, ?MODULE}|Options]).
+    Pid = spawn_opt(fun() ->
+			   {ok, S} = probe_init(Name, Type, Options),
+			   loop(S)
+		   end, [{min_heap_size, 100000},
+			 {priority, high}]),
+    exometer_admin:monitor(Name, Pid),
+    {ok, Pid}.
 
 probe_init(Name, _Type, Options) ->
-    St = process_opts(#st { name = Name }, [ {percentiles, [ 50, 75, 90, 95, 99, 999 ]},
-					     { time_span, 60000}, 
-					     { slot_period,100 } ] ++ Options),
+    erlang:monitor(process, exometer_sup),
+    St = process_opts(#st {name = Name},
+		      [{percentiles, [ 50, 75, 90, 95, 99, 999 ]},
+		       {time_span, 60000},
+		       {slot_period,100}] ++ Options),
     Slide = exometer_slot_slide:new(St#st.time_span,
 				    St#st.slot_period,
-				    { ?MODULE, average_sample, []},
-				    { ?MODULE, average_transform, []}),
-    {ok, St#st{ slide = Slide }}.
+				    fun average_sample/3,
+				    fun average_transform/2),
+    {ok, St#st{slide = Slide}}.
 
-delete(Name, Type, Ref) ->
-    exometer_probe:delete(Name, Type, Ref).
+loop(S) ->
+    receive
+        {'DOWN', _, process, exometer_sup, _} ->
+            exit(normal);
+	{update, Value} ->
+	    loop(probe_update(Value, S));
+	{From, Ref, get_value} ->
+	    From ! {Ref, probe_get_value(S)},
+	    loop(S);
+	reset ->
+	    loop(probe_reset(S))
+    end.
+
+delete(Name, Type, Ref) when is_pid(Ref) ->
+    exit(Ref, kill).
 
 probe_terminate(_ModSt) ->
     ok.
 
 get_value(Name, Type, Ref) ->
-    exometer_probe:get_value(Name, Type, Ref).
+    MRef = erlang:monitor(process, Ref),
+    Ref ! {self(), MRef, get_value},
+    receive
+	{MRef, Res} ->
+	    Res;
+	{'DOWN', MRef, _, _, _} ->
+	    unavailable
+    end.
 
 probe_get_value(St) ->
-    
     %% We need element count and sum of all elements to get mean value.
     Val = exometer_slot_slide:foldl(
-	    fun({_TS, Val}, {Length, Total, List}) -> { Length + 1, Total + Val, [ Val | List ]}  end, 
+	    fun({_TS, Val}, {Length, Total, List}) ->
+		    { Length + 1, Total + Val, [ Val | List ]}
+	    end,
 	    {0, 0.0, []}, St#st.slide),
-
     {Length, Total, Lst} = Val,
     Sorted = lists:sort(Lst),
 
@@ -77,27 +105,29 @@ probe_get_value(St) ->
     Median = case {Length, Length rem 2} of
 	{0, _} -> %% No elements
 	    0.0;
-	
-	{_, 0} -> %% Even number with at least two elements. Return average of two center elements
-	    lists:sum(lists:sublist(Sorted, trunc(Length / 2), 2)) / 2.0;
+	{_, 0} ->    %% Even number with at least two elements.
+		     %% Return average of two center elements
+		     lists:sum(lists:sublist(Sorted,
+					     trunc(Length / 2), 2)) / 2.0;
 
-	{_, 1}-> %% Odd number with at least one element. Return center element
+	{_, 1} ->    %% Odd number with at least one element.
+		     %% Return center element
 	    lists:nth(trunc(Length / 2) + 1, Sorted)
     end,
-
-    
     Mean = case Length of
 	       0 -> 0;
 	       _ -> Total / Length
 	   end,
-
-    Items = [{min,1}] ++ 
-	[ {P , perc(P / 100, Length) } || P <- St#st.percentiles ] ++ 
-	[ {max, Length} ],
-
+    Items = [{min, 1}] ++
+	[{P, perc(P / 100, Length) } || P <- St#st.percentiles] ++
+	[{max, Length}],
     [Min|Rest] = pick_items(Sorted, 1, Items),
-
-    {ok, [Min, {mean, Mean}, {arithmetic_mean, Mean}, {median, Median}, {percentile, lists:keydelete(max,1,Rest)}, lists:last(Rest)] }.
+    [Min,
+     {mean, Mean},
+     {arithmetic_mean, Mean},
+     {median, Median},
+     {percentile, lists:keydelete(max,1,Rest)},
+      lists:last(Rest)].
 
 
 pick_items([H|_] = L, P, [{Tag,P}|Ps]) ->
@@ -124,18 +154,20 @@ probe_setopts(_Opts, _St) ->
     error(unsupported).
 
 update(Name, Value, Type, Ref) ->
-    exometer_probe:update(Name, Value, Type, Ref).
+    Ref ! {update, Value},
+    ok.
 
 probe_update(Value, St) ->
     Slide = exometer_slot_slide:add_element(Value, St#st.slide),
-    {ok, ok, St#st { slide = Slide}}.
+    St#st{slide = Slide}.
 
 
 reset(Name, Type, Ref) ->
-    exometer_probe:reset(Name, Type, Ref).
+    Ref ! reset,
+    ok.
 
 probe_reset(St) ->
-    { ok, St#st { slide = exometer_slot_slide:reset(St#st.slide)} }.
+    St#st{slide = exometer_slot_slide:reset(St#st.slide)}.
 
 
 sample(_Name, _Type, _Ref) ->
@@ -189,4 +221,3 @@ average_transform(_TS, undefined) ->
 %% element to be stored in the histogram.
 average_transform(_TS, {Count, Total}) ->
     Total / Count. %% Return the sum of all counter increments received during this slot.
-

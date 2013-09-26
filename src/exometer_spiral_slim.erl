@@ -1,6 +1,6 @@
 %% MUST ONLY BE INVOKED THROUGH THE EXOMETER_PROBE.ERL MODULE.
 %% NOT MULTI-PROCESSS SAFE.
--module(exometer_spiral).
+-module(exometer_spiral_slim).
 -behaviour(exometer_entry).
 -behaviour(exometer_probe).
 
@@ -43,51 +43,83 @@
 %% exometer_entry callbacks
 %%
 new(Name, Type, Options) ->
-    exometer_probe:new(Name, Type, [{module, ?MODULE}|Options]).
+    Pid= spawn_opt(fun() ->
+			   {ok,S} = probe_init(Name, Type, Options),
+			   loop(S)
+		   end, [{min_heap_size, 100000},
+			 {priority, high}]),
+    exometer_admin:monitor(Name, Pid),
+    {ok, Pid}.
 
 probe_init(Name, _Type, Options) ->
-    St = process_opts(#st { name = Name }, [ { time_span, 60000}, 
+    erlang:monitor(process, exometer_sup),
+    St = process_opts(#st { name = Name }, [ { time_span, 60000},
 					     { slot_period,1000 } ] ++ Options),
     Slide = exometer_slot_slide:new(St#st.time_span,
 				    St#st.slot_period,
-				    { ?MODULE, count_sample, []},
-				    { ?MODULE, count_transform, []}),
+				    fun count_sample/3,
+				    fun count_transform/2),
     {ok, St#st{ slide = Slide }}.
 
+loop(S) ->
+    receive
+        {'DOWN', _, process, exometer_sup, _} ->
+            exit(normal);
+	{update, Value} ->
+	    loop(probe_update(Value, S));
+	{From, Ref, get_value} ->
+	    From ! {Ref, probe_get_value(S)},
+	    loop(S);
+	reset ->
+	    loop(probe_reset(S))
+    end.
+
 delete(Name, Type, Ref) ->
-    exometer_probe:delete(Name, Type, Ref).
+    exit(Ref, kill),
+    ok.
+
 
 probe_terminate(_ModSt) ->
     ok.
 
 get_value(Name, Type, Ref) ->
-    exometer_probe:get_value(Name, Type, Ref).
+    MRef = erlang:monitor(process, Ref),
+    Ref ! {self(), MRef, get_value},
+    receive
+	{MRef, Res} -> Res;
+	{'DOWN', MRef, _, _, _} ->
+	    unavailable
+    end.
 
 probe_get_value(St) ->
-    { ok, [{count, St#st.total}, 
-	   {one, exometer_slot_slide:foldl(fun({_TS, Val}, Acc) -> Acc + Val end,
-					   0, St#st.slide) } ]}.
+    [{count, St#st.total},
+     {one, exometer_slot_slide:foldl(
+		  fun({_TS, Val}, Acc) -> Acc + Val end,
+		  0, St#st.slide) } ].
 
 setopts(_Name, _Options, _Type, _Ref)  ->
-    ok.
+    { error, unsupported }.
 
 probe_setopts(_Opts, _St) ->
     error(unsupported).
 
 update(Name, Increment, Type, Ref) ->
-    exometer_probe:update(Name, Increment, Type, Ref).
+    Ref ! {update, Increment},
+    ok.
+
 
 probe_update(Increment, St) ->
     Slide = exometer_slot_slide:add_element(Increment, St#st.slide),
     Total = St#st.total + Increment,
-    {ok, ok, St#st { slide = Slide, total = Total}}.
+    St#st{slide = Slide, total = Total}.
 
 
 reset(Name, Type, Ref) ->
-    exometer_probe:reset(Name, Type, Ref).
+    Ref ! reset,
+    ok.
 
 probe_reset(St) ->
-    { ok, St#st { total = 0, slide = exometer_slot_slide:reset(St#st.slide)} }.
+    St#st{total = 0, slide = exometer_slot_slide:reset(St#st.slide)}.
 
 
 sample(_Name, _Type, _Ref) ->
@@ -124,7 +156,7 @@ process_opts(St, Options) ->
       end, St, Options).
 
 %% Simple sample processor that maintains a counter.
-%% of all 
+%% of all
 count_sample(_TS, Increment, undefined) ->
    Increment;
 

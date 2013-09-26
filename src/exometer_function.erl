@@ -33,7 +33,7 @@ reset(_, _, _) ->
     {error, unsupported}.
 
 setopts(_,_, _, _) ->
-    {error, unsupported}.
+    ok.
 
 delete(_, _, _) ->
     ok.

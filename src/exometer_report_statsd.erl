@@ -60,24 +60,31 @@ exometer_init(Opts) ->
 
 exometer_report(Metric, DataPoint, Extra, Value, #st{type_map = TypeMap} = St) ->
     Key = ets_key(Metric, DataPoint),
-    Name = name(Metric, DataPoint),
-    ?debug("Report metric ~p = ~p~n", [Name, Value]),
     case exometer_util:report_type(Key, Extra, TypeMap) of
+        {ok, id_gauge} ->
+            Name = name(Metric),
+            ID   = atom_to_list(DataPoint),
+            Line = [Name, ":", value(Value), "|", type(Type), " id=", ID];
+            {ok, St} = send(St, Line);
         {ok, Type} ->
+            Name = name(Metric, DataPoint),
             Line = [Name, ":", value(Value), "|", type(Type)],
-            case gen_udp:send(St#st.socket, St#st.address, St#st.port, Line) of
-                ok ->
-                    {ok, St};
-                {error, Reason} ->
-                    ?info("Unable to write metric. ~p~n", [Reason]),
-                    {ok, St}
-            end;
+            {ok, St} = send(St, Line);
         error ->
 	    ?warning(
 	       "Could not resolve ~p to a statsd type."
 	       "Update exometer_report_statsd -> type_map in app.config. "
 	       "Value lost~n", [Key]),
 	    {ok, St}
+    end.
+
+send(#st{}=St, Line) ->
+    case gen_udp:send(St#st.socket, St#st.address, St#st.port, Line) of
+        ok ->
+            {ok, St};
+        {error, Reason} ->
+            ?info("Unable to write metric. ~p~n", [Reason]),
+            {ok, St}
     end.
 
 exometer_subscribe(_Metric, _DataPoint, _Extra, _Interval, St) ->
@@ -114,6 +121,7 @@ exometer_terminate(_, _) ->
 get_opt(K, Opts, Def) ->
     exometer_util:get_opt(K, Opts, Def).
 
+type(id_gauge) -> "g"; %% datadog specific type, makes datatype an "id" attribute
 type(gauge) -> "g";
 type(counter) -> "c";
 type(timer) -> "ms";
@@ -123,6 +131,8 @@ type(set) -> "s". %% datadog specific type, see http://docs.datadoghq.com/guides
 
 ets_key(Metric, DataPoint) -> Metric ++ [ DataPoint ].
 
+name(Metric) ->
+    intersperse(".", lists:map(fun atom_to_list/1, Metric)).
 name(Metric, DataPoint) ->
     intersperse(".", lists:map(fun atom_to_list/1, ets_key(Metric, DataPoint))).
 
@@ -133,4 +143,3 @@ value(_)                    -> 0.
 intersperse(_, [])         -> [];
 intersperse(_, [X])        -> [X];
 intersperse(Sep, [X | Xs]) -> [X, Sep | intersperse(Sep, Xs)].
-

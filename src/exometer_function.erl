@@ -64,14 +64,14 @@ behaviour() ->
 %%
 %% `{function,...}' can be `{function, Mod, Fun}', in which case
 %% where `get_value(Name, DataPoints)' will result in a call to
-%% `Mod:Fun(DataPoints)'. 
+%% `Mod:Fun(DataPoints)'.
 %%  Invoking get_value(Name) (with no datapoints), will call
 %%  `Mod:Fun(default), which must return a default list of data point
 %%  values.
 %%
 %% `{function,...}' can also be setup as `{function,
 %% Mod,Fun,ArgSpec,Type,DataPoints}' in order to invoke a limited
-%% interpreter. The `ArgSpec' is evaluated as follows: 
+%% interpreter. The `ArgSpec' is evaluated as follows:
 %%
 %% <ul>
 %%  <li>`[]' means to call with no arguments, i.e. `M:F()'</li>
@@ -151,6 +151,17 @@ new(_Name, function, Opts) ->
             {ok, {?MODULE, empty}}
     end.
 
+get_value(_, function, {M, F, once, ArgsP, match, Pat}, DataPoints0) ->
+    DataPoints = if DataPoints0 == default ->
+                         pattern_datapoints(Pat);
+                    is_list(DataPoints0) ->
+                         DataPoints0
+                 end,
+    try call_once(M, F, ArgsP, match, {Pat, DataPoints})
+    catch
+        error:_ ->
+            {error, unavailable}
+    end;
 get_value(_, _, {M, F, each, ArgsP, Type, DPs}, DataPoints) ->
     [{D,call(M,F,ArgsP,Type,D)} || D <- datapoints(DataPoints, DPs),
                                    lists:member(D, DPs)];
@@ -342,7 +353,3 @@ match_pat(A, B, DPs) when is_atom(A), A =/= '_' ->
     end;
 match_pat(_, _, _) ->
     [].
-
-
-
-    

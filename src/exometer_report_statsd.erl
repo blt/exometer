@@ -64,7 +64,7 @@ exometer_report(Metric, DataPoint, Extra, Value, #st{type_map = TypeMap} = St) -
     ?debug("Report metric ~p = ~p~n", [Name, Value]),
     case exometer_util:report_type(Key, Extra, TypeMap) of
         {ok, Type} ->
-            Line = [Name, ":", value(Value), "|", type(Type)],
+            Line = [Name, ":", value(Name, Value), "|", type(Type)],
             case gen_udp:send(St#st.socket, St#st.address, St#st.port, Line) of
                 ok ->
                     {ok, St};
@@ -129,8 +129,12 @@ name(Metric, DataPoint) ->
 listify(A) when is_atom(A) -> atom_to_list(A);
 listify(I) when is_integer(I) -> integer_to_list(I).
 
-value(V) when is_integer(V) -> integer_to_list(V);
-value(V) when is_float(V)   -> io_lib:format("~.6f", [V]).
+value(_N, V) when is_integer(V) -> integer_to_list(V);
+value(_N, V) when is_float(V)   -> io_lib:format("~.6f", [V]);
+value(N, {ok, V}) -> value(N, V);
+value(N, V) ->
+    ?warning("Unsupported value type: ~p~nMetric for ~p lost.~n", [V, N]),
+    "0.0".
 
 intersperse(_, [])         -> [];
 intersperse(_, [X])        -> [X];
